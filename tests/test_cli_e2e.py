@@ -54,12 +54,14 @@ def cli_env(state_env):
     env.pop("WECOM_BOT_SECRET", None)
     env.pop("WECOM_BOT_ID", None)
     env["PYTHONUNBUFFERED"] = "1"
+    # 用随机端口，避免撞上本机真实在跑的 daemon（默认 47632）
+    env["WECOM_BOT_HTTP_PORT"] = str(free_port())
     return env
 
 
 async def test_cli_full_flow(state_env, gateway, cli_env):
     cli = Cli(cli_env)
-    port = free_port()
+    port = int(cli_env["WECOM_BOT_HTTP_PORT"])
 
     # daemon 没起来时，status 要明确告诉怎么启动
     code, out, err = await cli.run("status", check=False)
@@ -168,7 +170,7 @@ async def test_cli_setup_from_env_file(state_env, cli_env, tmp_path):
 async def test_cli_send_without_daemon_errors_clearly(state_env, cli_env, gateway):
     cli = Cli(cli_env)
     await cli.json("setup", "--bot-id", gateway.bot_id, "--secret", gateway.secret,
-                   "--ws-url", gateway.url, "--http-port", str(free_port()))
+                   "--ws-url", gateway.url, "--http-port", int(cli_env["WECOM_BOT_HTTP_PORT"]) and cli_env["WECOM_BOT_HTTP_PORT"])
     code, out, err = await cli.run("send", "--text", "x", check=False)
     assert code == 2
     assert "wecom daemon start" in (out + err)

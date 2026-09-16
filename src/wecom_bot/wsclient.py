@@ -73,6 +73,8 @@ class WeComWsClient:
         self.last_auth_at: Optional[float] = None
         self.reconnect_attempts = 0
         self.missed_pongs = 0
+        self.pongs = 0
+        self.last_pong_at: Optional[float] = None
 
         # req_id -> 等待回执的 Future 队列（FIFO）
         self._waiters: Dict[str, Deque[asyncio.Future]] = defaultdict(deque)
@@ -120,9 +122,12 @@ class WeComWsClient:
                 await self._connect_once()
             except asyncio.CancelledError:
                 raise
-            except Exception as e:  # 建连失败
-                self.last_error = f"{type(e).__name__}: {e}"
-                log.warning("建连失败：%s", self.last_error)
+            except Exception as e:  # 建连失败 / 连接中断
+                if self._stopping:
+                    log.debug("关闭过程中连接结束：%s", e)
+                else:
+                    self.last_error = f"{type(e).__name__}: {e}"
+                    log.warning("建连失败：%s", self.last_error)
             finally:
                 self._on_disconnected()
 
@@ -138,7 +143,7 @@ class WeComWsClient:
 
     async def _connect_once(self) -> None:
         log.info("连接 %s", self._ws_url)
-        kwargs: Dict[str, Any] = {"ping_interval": None, "ping_timeout": None, "close_timeout": 5}
+        kwargs: Dict[str, Any] = {"ping_interval": None, "ping_timeout": None, "close_timeout": 2}
         if self._ws_url.startswith("wss://"):
             kwargs["ssl"] = self._ssl or ssl.create_default_context()
         async with websockets.connect(self._ws_url, **kwargs) as ws:
@@ -166,7 +171,7 @@ class WeComWsClient:
         self._authed_event.clear()
         self._cancel_heartbeat()
         self._fail_all_waiters("长连接已断开")
-        if was:
+        if was and not self._stopping:
             log.warning("长连接断开")
 
     # ---------- 帧处理 ----------
@@ -202,7 +207,12 @@ class WeComWsClient:
         # 心跳应答
         if req_id.startswith(P.CMD_PING):
             if errcode == 0:
+                import time as _t
+
                 self.missed_pongs = 0
+                self.pongs += 1
+                self.last_pong_at = _t.time()
+                log.debug("心跳回执 #%d", self.pongs)
             else:
                 log.warning("心跳回执异常 errcode=%s errmsg=%s", errcode, frame.get("errmsg"))
             return
@@ -323,6 +333,9 @@ class WeComWsClient:
             "authenticated": self.authenticated,
             "conn_gen": self.conn_gen,
             "reconnect_attempts": self.reconnect_attempts,
+            "pongs": self.pongs,
+            "missed_pongs": self.missed_pongs,
+            "last_pong_at": self.last_pong_at,
             "last_error": self.last_error,
             "last_auth_at": self.last_auth_at,
             "ws_url": self._ws_url,

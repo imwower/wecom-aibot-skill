@@ -162,6 +162,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"daemon 运行中 pid={health.get('pid')} 已跑 {health.get('uptime')}s\n"
         f"长连接 connected={ws.get('connected')} authenticated={ws.get('authenticated')} "
         f"第 {ws.get('conn_gen')} 代 重连 {ws.get('reconnect_attempts')} 次\n"
+        f"心跳 已收 {ws.get('pongs')} 个回执 未回 {ws.get('missed_pongs')} 最近 {_fmt_ts(ws.get('last_pong_at'))}\n"
         f"bot_id={health.get('bot_id')}  未读 {health.get('unread')}  最近一分钟已发 {health.get('sent_last_minute')} 条\n"
         f"最近会话 {json.dumps(health.get('last_chat'), ensure_ascii=False)}\n"
         f"收件箱 {health.get('inbox')}\n日志 {health.get('log')}"
