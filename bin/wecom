@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# wecom CLI 包装：始终使用仓库内的 .venv，不污染系统 Python。
+set -euo pipefail
+
+# 解析自身真实路径（可能通过软链调用）
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ $src != /* ]] && src="$dir/$src"
+done
+REPO="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+PY="$REPO/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "错误：找不到虚拟环境 $PY" >&2
+  echo "请在 $REPO 执行： uv venv && uv pip install -e '.[dev]'" >&2
+  exit 1
+fi
+exec "$PY" "$REPO/scripts/wecom.py" "$@"

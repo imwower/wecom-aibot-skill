@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# 前台运行 daemon（launchd / 调试用）。
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ $src != /* ]] && src="$dir/$src"
+done
+REPO="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+PY="$REPO/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "错误：找不到虚拟环境 $PY" >&2
+  exit 1
+fi
+export PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m wecom_bot.daemon "$@"

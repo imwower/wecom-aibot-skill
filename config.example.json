@@ -1,0 +1,16 @@
+{
+  "bot_id": "aib_REPLACE_ME",
+  "secret": "REPLACE_ME_长连接专用密钥_不要提交进仓库",
+  "ws_url": "wss://openws.work.weixin.qq.com",
+  "http_host": "127.0.0.1",
+  "http_port": 47632,
+  "ack_text": "收到，处理中…",
+  "heartbeat_interval": 30.0,
+  "reconnect_base_delay": 1.0,
+  "reconnect_max_delay": 30.0,
+  "stream_window": 570.0,
+  "ack_timeout": 5.0,
+  "download_media": true,
+  "http_token": "",
+  "log_level": "INFO"
+}

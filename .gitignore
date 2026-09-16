@@ -1,0 +1,31 @@
+# 虚拟环境与构建产物
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# 本地配置与密钥（绝不进仓库）
+config/
+config.json
+*.secret
+.env
+credentials.env
+
+# 运行期状态与日志
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
+logs/
+state/
+media/
+*.pid
+*.lock
+
+# 测试与编辑器
+.pytest_cache/
+.DS_Store
+.idea/
+.vscode/
