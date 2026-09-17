@@ -23,5 +23,6 @@
   "ai_idle_timeout": 300,
   "ai_provider": "codex",
   "ai_model": "",
-  "ai_full_access": false
+  "ai_full_access": false,
+  "ai_message_window": 3
 }

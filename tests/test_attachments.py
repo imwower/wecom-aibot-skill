@@ -103,3 +103,40 @@ def test_corrupted_ciphertext_rejected():
     from wecom_bot.media import decrypt
     with pytest.raises(ValueError,match='长度'):
         decrypt(b'truncated',base64.b64encode(b'1'*32).decode())
+
+
+@pytest.mark.parametrize('text_first', [True, False])
+@pytest.mark.parametrize('fail', [True, False])
+async def test_adjacent_callbacks_merge_once_and_wait_for_download(state_env,gateway,monkeypatch,text_first,fail):
+    d=await start_daemon(gateway,auto_enabled=True,owner_userid='owner',ai_message_window=.15)
+    calls=[]
+    async def download(*args,**kwargs):
+        await asyncio.sleep(.4)
+        if fail:raise ValueError('download failed')
+        p=state_env['root']/'sample.txt';p.write_text('fixture-content')
+        return p
+    async def run(cfg,jobs,job):
+        ctx=jobs.attachment_context(job)
+        assert job['prompt']=='概括附件内容'
+        assert Path(ctx[0]['files'][0]['path']).read_text()=='fixture-content'
+        calls.append(job['id']);jobs.execution(job['id'],outcome='success')
+        return '已概括附件'
+    monkeypatch.setattr('wecom_bot.daemon.download_and_decrypt',download)
+    monkeypatch.setattr('wecom_bot.automation.run_ai',run)
+    d.automation.start()
+    b={'aibotid':gateway.bot_id,'msgid':'attachment-reorder','chattype':'single','from':{'userid':'owner'},
+       'msgtype':'file','file':{'url':'https://example.test/attachment','aeskey':'fake'}}
+    try:
+        if text_first:await gateway.push_text('概括附件内容',userid='owner')
+        await gateway.push_callback(b)
+        if not text_first:await gateway.push_text('概括附件内容',userid='owner')
+        await until(lambda:len(gateway.sends)==1)
+        await asyncio.sleep(.2)
+        assert len(gateway.sends)==1 and len(calls)==(0 if fail else 1)
+        rows=list(d.automation.jobs.db.execute('SELECT * FROM jobs ORDER BY id'))
+        assert rows[0]['state']=='sent' and rows[1]['state']=='merged'
+        assert rows[1]['merged_into']==rows[0]['id']
+        assert rows[0]['outcome']==('blocked' if fail else 'success')
+    finally:
+        await asyncio.gather(*list(d._attachment_tasks),return_exceptions=True)
+        await d.automation.close();await d.client.stop();d.store.close()

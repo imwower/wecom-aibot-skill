@@ -28,6 +28,7 @@ def make_cfg(gw, **kw) -> Config:
         reconnect_base_delay=0.05,
         reconnect_max_delay=0.2,
         ack_timeout=3.0,
+        ai_message_window=0,
     )
     base.update(kw)
     return Config(**base)

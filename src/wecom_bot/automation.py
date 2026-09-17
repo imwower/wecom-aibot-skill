@@ -40,7 +40,8 @@ class Jobs:
             for name, kind in [('outcome', "TEXT NOT NULL DEFAULT 'unknown'"),
                                ('started_at', 'REAL'), ('finished_at', 'REAL'),
                                ('exit_code', 'INTEGER'), ('stderr_tail', 'TEXT'),
-                               ('error_kind', 'TEXT'), ('attachments', "TEXT NOT NULL DEFAULT '[]'")]:
+                               ('error_kind', 'TEXT'), ('attachments', "TEXT NOT NULL DEFAULT '[]'"),
+                               ('input_kind', "TEXT NOT NULL DEFAULT 'text'"), ('merged_into', 'INTEGER')]:
                 if name not in columns:
                     self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {kind}')
 
@@ -62,6 +63,40 @@ class Jobs:
                 'VALUES(?,?,?,?,?,?,?,?,?)',
                 (row_id, body['msgid'], key, target, kind, body['from']['userid'], prompt,
                  time.time(), time.time()))
+            self.db.execute('UPDATE jobs SET input_kind=? WHERE id=?', (body.get('msgtype', 'text'), row_id))
+
+    def coalesce(self, job, window):
+        """固定窗口内合并附件与一条处理指令。None 表示尚需等待下载。"""
+        if window <= 0:
+            return job
+        rows = self.db.execute("SELECT * FROM jobs WHERE chat_key=? AND owner=? AND id>=? AND created_at<=? AND state IN ('accepting','queued','downloading','ready') ORDER BY id",
+            (job['chat_key'], job['owner'], job['id'], job['created_at'] + window)).fetchall()
+        batch = []
+        instruction = None
+        for row in rows:
+            if row['input_kind'] not in ('file', 'image', 'video'):
+                if instruction is not None:
+                    break
+                instruction = row
+            batch.append(row)
+        has_media = any(r['input_kind'] in ('file', 'image', 'video') or r['attachments'] != '[]' or r['state'] == 'downloading' for r in batch)
+        if len(batch) < 2 or not has_media or instruction is None:
+            return job
+        if any(r['state'] in ('accepting', 'downloading') for r in batch):
+            return None
+        attachments = []
+        for row in batch:
+            attachments.extend(json.loads(row['attachments']))
+        failed = any(r['error_kind'] == 'attachment_download' for r in batch)
+        with self.db:
+            self.db.execute('UPDATE jobs SET prompt=?,attachments=? WHERE id=?',
+                (instruction['prompt'], json.dumps(attachments, ensure_ascii=False), job['id']))
+            if failed:
+                self.db.execute("UPDATE jobs SET state='ready',outcome='blocked',error_kind='attachment_download',result='关联附件下载失败，请重新发送附件和处理指令；本次没有执行任务。' WHERE id=?", (job['id'],))
+            for row in batch[1:]:
+                self.db.execute("UPDATE jobs SET state='merged',outcome='merged',merged_into=?,updated_at=? WHERE id=?",
+                    (job['id'], time.time(), row['id']))
+        return self.db.execute('SELECT * FROM jobs WHERE id=?', (job['id'],)).fetchone()
 
     def update(self, job_id, state, result=None):
         with self.db:
@@ -69,14 +104,14 @@ class Jobs:
                             (state, result, time.time(), job_id))
 
     def next(self):
-        return self.db.execute("SELECT * FROM jobs WHERE state IN ('queued','ready','downloading') ORDER BY id LIMIT 1").fetchone()
+        return self.db.execute("SELECT * FROM jobs WHERE state IN ('accepting','queued','ready','downloading') ORDER BY id LIMIT 1").fetchone()
 
     def attach(self, job_id, files):
         with self.db:
             self.db.execute('UPDATE jobs SET attachments=? WHERE id=?', (json.dumps(files, ensure_ascii=False), job_id))
 
     def attachment_context(self, job):
-        rows = self.db.execute("SELECT id,attachments,error_kind FROM jobs WHERE chat_key=? AND owner=? AND id<=? AND created_at>=? AND (attachments!='[]' OR error_kind='attachment_download') ORDER BY id DESC LIMIT 10",
+        rows = self.db.execute("SELECT id,attachments,error_kind FROM jobs WHERE chat_key=? AND owner=? AND id<=? AND created_at>=? AND merged_into IS NULL AND (attachments!='[]' OR error_kind='attachment_download') ORDER BY id DESC LIMIT 10",
             (job['chat_key'], job['owner'], job['id'], job['created_at'] - 86400)).fetchall()
         return [{'message_id': r['id'], 'files': json.loads(r['attachments']),
                  'download_failed': r['error_kind'] == 'attachment_download'} for r in reversed(rows)]
@@ -273,7 +308,15 @@ class Automation:
             if job is None or not self.daemon.client.authenticated:
                 await asyncio.sleep(0.25)
                 continue
-            if job['state'] == 'downloading':
+            if job['state'] in ('queued', 'downloading') or job['error_kind'] == 'attachment_download':
+                if time.time() < job['created_at'] + self.cfg.ai_message_window:
+                    await asyncio.sleep(0.1)
+                    continue
+                job = self.jobs.coalesce(job, self.cfg.ai_message_window)
+                if job is None:
+                    await asyncio.sleep(0.1)
+                    continue
+            if job['state'] in ('accepting', 'downloading'):
                 await asyncio.sleep(0.25)
                 continue
             # 修改白名单后不能继续处理原 owner 的积压任务。

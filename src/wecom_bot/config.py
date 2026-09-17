@@ -51,6 +51,7 @@ class Config:
     ai_cwd: str = "~/code"
     ai_timeout: float = 900.0
     ai_idle_timeout: float = 300.0
+    ai_message_window: float = 3.0  # 相邻附件和文字回调的合并等待秒数
 
     def with_env_overrides(self) -> "Config":
         """应用环境变量覆盖（只覆盖敏感/易变项）。"""
@@ -96,6 +97,8 @@ def load(required: bool = True) -> Config:
         raise ConfigError('ai_full_access 必须是布尔值')
     if cfg.ai_timeout <= 0 or cfg.ai_idle_timeout <= 0:
         raise ConfigError('AI 超时必须大于 0')
+    if not 0 <= cfg.ai_message_window <= 30:
+        raise ConfigError('ai_message_window 必须在 0 到 30 秒之间')
     if required:
         if not cfg.bot_id:
             raise ConfigError(
