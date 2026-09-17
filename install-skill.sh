@@ -33,6 +33,11 @@ link_one() {
 link_one "$HOME/.claude/skills"
 link_one "$HOME/.codex/skills"
 
+SRC="$REPO/src/wecom_bot/context_skill"
+NAME="wecom-context"
+link_one "$HOME/.claude/skills"
+link_one "$HOME/.codex/skills"
+
 # 可选：把 wecom 放到 PATH 上
 BIN_DIR="$HOME/.local/bin"
 if [ -d "$BIN_DIR" ]; then

@@ -261,9 +261,8 @@ wecom --json status
 ### 持久聊天上下文
 
 机器人收到的原始消息保存在 `inbox.sqlite`；已通过身份/触发门禁的消息、执行结果和
-附件记录保存在 `tasks.sqlite`。每次 AI 调用额外注入当前会话同一所有者最近 20 条消息
-（历史正文总预算 16000 字符，单条输入/回复最多 2000 字符）、已生成回复及其发送状态、
-当前引用文字和最近 10 条附件记录，并保存到当前任务的 `context_snapshot` 供排查。
+附件记录保存在 `tasks.sqlite`。当前版本改为按需查询：AI 自行决定是否调用只读上下文接口，不再固定注入 20 条历史或 10 条附件。
+每轮仅给出当前任务、当前引用及查询工具入口；实际查询响应保存到 `context_reads` 供排查。
 历史记录仅帮助理解指代，不构成新的执行指令；不会跨群、跨私聊拼接，也不包含未来文字任务。
 
 附件保存后可以隔几分钟再发送处理指令，不依赖 3 秒合并窗口；3 秒窗口只用于处理文字与
@@ -292,3 +291,32 @@ cp src/wecom_bot/assistant_prompt.md ~/.config/wecom-bot/assistant.md
 空路径使用内置提示词。自定义文件为空、不可读或超过 128 KiB 时任务明确失败，不静默忽略。
 外层仍统一要求 JSON 结果并负责发送消息；提示词不改变代码中的账号白名单或 CLI 权限设置。
 提示词不是访问控制或隔离边界，实际工具权限由 CLI 配置决定。
+
+## AI 按需查询聊天记录（0.3.0）
+
+AI 可使用独立技能 [wecom-context](src/wecom_bot/context_skill/SKILL.md)，
+自行决定是否查询历史。任务提示自动提供可执行的绝对 Python 路径和技能文件路径。
+`install-skill.sh` 也会将该技能安装到 Codex 与 Claude 的技能目录。
+
+```bash
+wecom context summary
+wecom context history --limit 10
+wecom context history --query 证书 --before 42
+wecom context message --id 21
+wecom context attachments --query report --limit 5
+```
+
+这些命令仅在 AI 任务进程内有临时凭证时可用，普通终端不会自动获得所有会话的访问权。
+等价调用为 `python -m wecom_bot.context ...`。HTTP 接口是 `GET /context?action=history&limit=10`，
+使用独立的 `X-Wecom-Context` 请求头，凭证由任务执行器注入，不需要向 AI 提供机器人 Secret。
+
+接口固定限制为当前会话、当前所有者、当前任务消息编号及以前的数据；关键词为字面匹配。
+列表每页最多 20 条，可用 `next_before` 翻页；单条消息展开最多 20000 字符/字段，返回截断标志。
+附件接口只返回清单，不返回下载签名 URL 或解密密钥；AI 仍须用读取工具查看本地文件。
+
+查询凭证在任务完成、失败、超时或取消后撤销，且有过期时间。只读指不改业务消息和已读状态；
+查询审计会写入本地 `context_reads`（动作、参数、实际返回数据），不保存明文凭证。
+该凭证不能用于发送接口。CLI 需要能通过自身工具访问本机 HTTP 服务；受限沙箱可能阻止查询。
+完整权限 CLI 本身仍可访问本机其他资源，接口隔离不等于对整个 CLI 的安全隔离。
+
+聊天数据只存放在本地状态目录；不会提交到 Git。

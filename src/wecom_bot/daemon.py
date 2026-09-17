@@ -26,6 +26,7 @@ from .media import download_and_decrypt
 from .store import Store, row_to_dict
 from .wsclient import AckError, NotConnected, WeComWsClient
 from .automation import Automation, accepted_prompt
+from .context import ContextAccess
 
 log = logging.getLogger("wecom.daemon")
 
@@ -316,6 +317,7 @@ class Daemon:
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self._auth_middleware])
         app.router.add_get("/health", self.h_health)
+        app.router.add_get("/context", self.h_context)
         app.router.add_get("/messages", self.h_messages)
         app.router.add_post("/messages/{ident}/read", self.h_mark_read)
         app.router.add_get("/wait", self.h_wait)
@@ -326,10 +328,26 @@ class Daemon:
 
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        if request.path == '/context':
+            return await handler(request)  # 独立的任务级凭证；不放行其他路由。
+        if request.headers.get('X-Wecom-Context'):
+            return web.json_response({'error': 'context credential is read-only'}, status=403)
         if self.cfg.http_token:
             if request.headers.get("X-Wecom-Token") != self.cfg.http_token:
                 return web.json_response({"error": "unauthorized"}, status=401)
         return await handler(request)
+
+    async def h_context(self, request):
+        if not self.automation:
+            return web.json_response({'error': 'automation disabled'}, status=404)
+        try:
+            result = ContextAccess(self.automation.jobs).query(
+                request.headers.get('X-Wecom-Context', ''), request.query.get('action', 'summary'), request.query)
+            return web.json_response(result)
+        except PermissionError:
+            return web.json_response({'error': 'invalid task credential'}, status=401)
+        except (ValueError, TypeError):
+            return web.json_response({'error': 'invalid query'}, status=400)
 
     async def h_health(self, request: web.Request) -> web.Response:
         last = self.store.last_chat()

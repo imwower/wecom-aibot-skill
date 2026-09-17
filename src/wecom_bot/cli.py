@@ -387,6 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level")
     p.set_defaults(func=cmd_setup)
 
+    p = sub.add_parser("context", help="按需只读查询当前 AI 任务的历史和附件")
+    p.add_argument("context_args", nargs=argparse.REMAINDER)
+    p.set_defaults(func=lambda args: __import__("wecom_bot.context", fromlist=["main"]).main(args.context_args))
+
     p = sub.add_parser("status", help="看 daemon 与长连接状态")
     p.set_defaults(func=cmd_status)
 
@@ -438,6 +442,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == 'context':
+        from .context import main as context_main
+        return context_main(argv[1:])
     ap = build_parser()
     args = ap.parse_args(argv)
     try:
