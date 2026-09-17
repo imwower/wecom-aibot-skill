@@ -24,6 +24,7 @@ from .logging_setup import setup as setup_logging
 from .media import download_and_decrypt
 from .store import Store, row_to_dict
 from .wsclient import AckError, NotConnected, WeComWsClient
+from .automation import Automation, accepted_prompt
 
 log = logging.getLogger("wecom.daemon")
 
@@ -49,6 +50,7 @@ class Daemon:
         )
         self._runner: Optional[web.AppRunner] = None
         self._stop_event = asyncio.Event()
+        self.automation = Automation(self) if cfg.auto_enabled else None
 
     # ---------- 收消息 ----------
 
@@ -58,6 +60,7 @@ class Daemon:
         kind = "event" if frame.get("cmd") == P.CMD_EVENT_CALLBACK else "message"
         msgid = body.get("msgid")
         text = P.extract_text(body)
+        auto_prompt = accepted_prompt(self.cfg, body, kind)
 
         # 单聊回调可能没有 chatid，此时 chatid 即用户 userid
         from_userid = (body.get("from") or {}).get("userid")
@@ -91,6 +94,28 @@ class Daemon:
             self.store.remember_chat(chatid, chattype)
             self.new_message.set()
             self.new_message.clear()
+
+        if self.automation:
+            if row_id is not None and auto_prompt is not None:
+                self.automation.jobs.enqueue(row_id, body, auto_prompt)
+                try:
+                    if not self._rate_limited():
+                        summary = ' '.join(auto_prompt.split())
+                        prefix, suffix = '任务已接单：（', '），完成后通知你。'
+                        budget = 100 - len(prefix) - len(suffix)
+                        if len(summary) > budget:
+                            summary = summary[:budget - 1] + '…'
+                        ack_text = prefix + summary + suffix
+                        frame = P.respond_frame(req_id, P.stream_body(P.generate_req_id('ack'),
+                            ack_text, finish=True))
+                        await self.client.send_and_wait(frame)
+                        self.store.add_sent(route='stream', chatid=chatid, reply_to=msgid,
+                            msgtype='stream', content=ack_text, ok=True)
+                except Exception:
+                    log.warning('任务 #%s 接单回执未确认；任务已持久化，不重复发送回执', row_id)
+                finally:
+                    self.automation.jobs.update(row_id, 'queued')
+            return
 
         # 先在 5 秒窗口内回确认（同时把流开起来，后续 reply 可以续写）
         if kind == "message" and self.cfg.ack_text and row_id is not None:
@@ -278,6 +303,15 @@ class Daemon:
                 "sent_last_minute": self.store.sent_count_since(time.time() - 60),
                 "inbox": str(paths.inbox_path()),
                 "log": str(paths.daemon_log_path()),
+                "automation": {
+                    "enabled": self.cfg.auto_enabled,
+                    "provider": self.cfg.ai_provider,
+                    "full_access": self.cfg.ai_full_access,
+                    "owner_configured": bool(self.cfg.owner_userid),
+                    "tasks": self.automation.jobs.status() if self.automation else {},
+                    "outcomes": self.automation.jobs.outcomes() if self.automation else {},
+                    "worker_alive": bool(self.automation and self.automation.task and not self.automation.task.done()),
+                },
             }
         )
 
@@ -386,6 +420,8 @@ class Daemon:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.cfg.http_host, self.cfg.http_port)
         await site.start()
+        if self.automation:
+            self.automation.start()
         log.info(
             "daemon 启动：bot_id=%s http=http://%s:%d 收件箱=%s",
             self.cfg.bot_id,
@@ -405,6 +441,8 @@ class Daemon:
             await self._stop_event.wait()
         finally:
             log.info("daemon 收到退出信号，正在关闭")
+            if self.automation:
+                await self.automation.close()
             await self.client.stop()
             if self._runner:
                 await self._runner.cleanup()

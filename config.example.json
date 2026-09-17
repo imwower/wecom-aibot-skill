@@ -12,5 +12,16 @@
   "ack_timeout": 5.0,
   "download_media": true,
   "http_token": "",
-  "log_level": "INFO"
+  "log_level": "INFO",
+  "auto_enabled": false,
+  "owner_userid": "",
+  "trigger_prefix": "@我的AI",
+  "private_requires_prefix": false,
+  "ai_executable": "",
+  "ai_cwd": "~/code",
+  "ai_timeout": 900,
+  "ai_idle_timeout": 300,
+  "ai_provider": "codex",
+  "ai_model": "",
+  "ai_full_access": false
 }

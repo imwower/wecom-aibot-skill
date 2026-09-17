@@ -39,6 +39,18 @@ class Config:
     # 可选：本地 HTTP 接口的简单令牌，设置后请求需带 X-Wecom-Token
     http_token: str = ""
     log_level: str = "INFO"
+    # 自动任务：未配置 owner 时一律不执行。默认关闭，兼容手动收发。
+    auto_enabled: bool = False
+    owner_userid: str = ""
+    trigger_prefix: str = "@我的AI"
+    private_requires_prefix: bool = False
+    ai_provider: str = "codex"  # codex | claude
+    ai_executable: str = ""    # 空值时从 PATH 查找对应 CLI
+    ai_model: str = ""         # 空值沿用 CLI 自身模型配置
+    ai_full_access: bool = False
+    ai_cwd: str = "~/code"
+    ai_timeout: float = 900.0
+    ai_idle_timeout: float = 300.0
 
     def with_env_overrides(self) -> "Config":
         """应用环境变量覆盖（只覆盖敏感/易变项）。"""
@@ -78,6 +90,12 @@ def load(required: bool = True) -> Config:
     for k in unknown:
         data.pop(k)
     cfg = Config(**data).with_env_overrides()
+    if cfg.ai_provider not in ('codex', 'claude'):
+        raise ConfigError('ai_provider 必须是 codex 或 claude')
+    if not isinstance(cfg.ai_full_access, bool):
+        raise ConfigError('ai_full_access 必须是布尔值')
+    if cfg.ai_timeout <= 0 or cfg.ai_idle_timeout <= 0:
+        raise ConfigError('AI 超时必须大于 0')
     if required:
         if not cfg.bot_id:
             raise ConfigError(

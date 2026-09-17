@@ -9,9 +9,12 @@ dist/
 # 本地配置与密钥（绝不进仓库）
 config/
 config.json
+config.json.*
 *.secret
 .env
+.env.*
 credentials.env
+.env.*
 
 # 运行期状态与日志
 *.sqlite

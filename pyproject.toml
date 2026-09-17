@@ -1,7 +1,8 @@
 [project]
 name = "wecom-bot"
-version = "0.1.0"
+version = "0.2.0"
 description = "企业微信智能机器人（API 模式 · 长连接）本地收发工具"
+license = "MIT"
 requires-python = ">=3.9"
 dependencies = [
     "websockets>=12.0",

@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": {"type": "string", "enum": ["success", "blocked", "failed"]},
+    "message": {"type": "string"}
+  },
+  "required": ["outcome", "message"],
+  "additionalProperties": false
+}
