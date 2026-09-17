@@ -37,7 +37,7 @@ def decrypt(data: bytes, aes_key: str) -> bytes:
     iv = key[:16]
     block = 16
     if len(data) % block:
-        data = data + b"\x00" * (block - len(data) % block)
+        raise ValueError('附件密文长度无效')
     dec = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
     plain = dec.update(data) + dec.finalize()
     if not plain:
@@ -46,9 +46,7 @@ def decrypt(data: bytes, aes_key: str) -> bytes:
     if 1 <= pad_len <= 32 and pad_len <= len(plain):
         if all(plain[i] == pad_len for i in range(len(plain) - pad_len, len(plain))):
             return plain[: len(plain) - pad_len]
-    # 填充不合法时原样返回，交给调用方判断（比手工报错更不容易丢数据）
-    log.warning("PKCS#7 填充异常（pad=%s），返回未去填充的数据", pad_len)
-    return plain
+    raise ValueError('附件解密填充无效')
 
 
 def _filename_from_headers(cd: str) -> Optional[str]:
@@ -76,6 +74,7 @@ async def download_and_decrypt(
     kind: str = "file",
     msgid: str = "",
     timeout: float = 30.0,
+    max_bytes: int = 50 * 1024 * 1024,
 ) -> Path:
     """下载并解密，保存到 dest_dir，返回本地路径。"""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -85,7 +84,12 @@ async def download_and_decrypt(
     ) as s:
         async with s.get(url) as resp:
             resp.raise_for_status()
-            blob = await resp.read()
+            blob = bytearray()
+            async for chunk in resp.content.iter_chunked(65536):
+                blob.extend(chunk)
+                if len(blob) > max_bytes:
+                    raise ValueError('附件超过 50 MiB 下载上限')
+            blob = bytes(blob)
             remote_name = _filename_from_headers(resp.headers.get("Content-Disposition", ""))
             ctype = resp.headers.get("Content-Type", "")
 

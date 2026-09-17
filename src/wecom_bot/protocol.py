@@ -137,6 +137,8 @@ def extract_text(body: Dict[str, Any]) -> str:
     if msgtype == "event":
         ev = body.get("event", {}) or {}
         return f"[event:{ev.get('eventtype', 'unknown')}]"
+    if msgtype == "voice" and body.get('voice', {}).get('content'):
+        return str(body['voice']['content'])
     if msgtype in ("image", "voice", "file", "video"):
         return f"[{msgtype}]"
     return f"[{msgtype}]" if msgtype else ""
@@ -149,3 +151,19 @@ def media_ref(body: Dict[str, Any]) -> Optional[Dict[str, str]]:
         if isinstance(node, dict) and node.get("url"):
             return {"kind": kind, "url": node["url"], "aeskey": node.get("aeskey", "")}
     return None
+
+
+def media_refs(body: Dict[str, Any]) -> list:
+    """附件、图文混排图片和引用附件；保持消息顺序。"""
+    refs = []
+    ref = media_ref(body)
+    if ref:
+        refs.append(ref)
+    for item in (body.get('mixed') or {}).get('msg_item', []) or []:
+        ref = media_ref(item)
+        if ref:
+            refs.append(ref)
+    quote = body.get('quote')
+    if isinstance(quote, dict):
+        refs.extend(media_refs({k: v for k, v in quote.items() if k != 'quote'}))
+    return refs

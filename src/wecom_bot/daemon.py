@@ -51,6 +51,7 @@ class Daemon:
         self._runner: Optional[web.AppRunner] = None
         self._stop_event = asyncio.Event()
         self.automation = Automation(self) if cfg.auto_enabled else None
+        self._attachment_tasks = set()
 
     # ---------- 收消息 ----------
 
@@ -98,6 +99,10 @@ class Daemon:
         if self.automation:
             if row_id is not None and auto_prompt is not None:
                 self.automation.jobs.enqueue(row_id, body, auto_prompt)
+                refs = P.media_refs(body)
+                needs_media = bool(refs) or body.get('msgtype') in ('file', 'image', 'video')
+                if needs_media:
+                    self.automation.jobs.update(row_id, 'downloading')
                 try:
                     if not self._rate_limited():
                         summary = ' '.join(auto_prompt.split())
@@ -114,7 +119,12 @@ class Daemon:
                 except Exception:
                     log.warning('任务 #%s 接单回执未确认；任务已持久化，不重复发送回执', row_id)
                 finally:
-                    self.automation.jobs.update(row_id, 'queued')
+                    if needs_media:
+                        task = asyncio.create_task(self._prepare_attachments(row_id, refs))
+                        self._attachment_tasks.add(task)
+                        task.add_done_callback(self._attachment_tasks.discard)
+                    else:
+                        self.automation.jobs.update(row_id, 'queued')
             return
 
         # 先在 5 秒窗口内回确认（同时把流开起来，后续 reply 可以续写）
@@ -126,6 +136,30 @@ class Daemon:
             ref = P.media_ref(body)
             if ref:
                 asyncio.ensure_future(self._fetch_media(row_id, ref, msgid or str(row_id)))
+
+    async def _prepare_attachments(self, row_id, refs):
+        jobs = self.automation.jobs
+        async def download():
+            files = []
+            for index, ref in enumerate(refs):
+                path = await download_and_decrypt(ref['url'], ref.get('aeskey', ''), paths.media_dir(),
+                    kind=ref['kind'], msgid=f'{row_id}-{index}')
+                files.append({'path': str(path), 'kind': ref['kind']})
+            return files
+        try:
+            if not self.cfg.download_media or not refs or len(refs) > 10:
+                raise ValueError('attachments unavailable')
+            files = await asyncio.wait_for(download(), 120)
+            jobs.attach(row_id, files)
+            self.store.set_media_path(row_id, files[0]['path'])
+            jobs.update(row_id, 'queued')
+        except (Exception, asyncio.CancelledError) as exc:
+            jobs.execution(row_id, outcome='blocked', finished_at=time.time(), error_kind='attachment_download')
+            jobs.update(row_id, 'ready', '附件下载未完成（链接可能已失效、文件过大或下载被关闭），请重新发送；本次未执行附件中的任何操作。')
+            # 不记录含签名的下载链接或解密密钥。
+            log.warning('附件 #%s 下载失败，类型=%s', row_id, type(exc).__name__)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
 
     async def _send_ack(self, row_id: int, req_id: str) -> None:
         stream_id = P.generate_req_id("stream")
@@ -441,6 +475,11 @@ class Daemon:
             await self._stop_event.wait()
         finally:
             log.info("daemon 收到退出信号，正在关闭")
+            pending = list(self._attachment_tasks)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             if self.automation:
                 await self.automation.close()
             await self.client.stop()
