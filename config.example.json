@@ -24,5 +24,6 @@
   "ai_provider": "codex",
   "ai_model": "",
   "ai_full_access": false,
-  "ai_message_window": 3
+  "ai_message_window": 3,
+  "ai_prompt_file": ""
 }

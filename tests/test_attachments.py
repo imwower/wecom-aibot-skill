@@ -56,14 +56,15 @@ async def test_encrypted_file_then_instruction(state_env, gateway, monkeypatch, 
         assert not calls
         assert d.automation.jobs.next()['state']=='downloading'
         release.set()
-        await until(lambda:len(gateway.sends)==2)
+        await until(lambda:len(gateway.sends)==(2 if fail else 1))
         rows=list(d.automation.jobs.db.execute('SELECT * FROM jobs ORDER BY id'))
         if fail:
             assert rows[0]['outcome']=='blocked'
             assert len(calls)==1 and calls[0][1][-1]['download_failed']
             assert '下载未完成' in gateway.sends[0]['body']['markdown']['content']
         else:
-            assert len(calls)==2
+            assert len(calls)==1
+            assert rows[0]["state"]=="stored"
             assert d.store.get('1')['media_path']
             assert json.loads(rows[0]['attachments'])
         assert all(x['body']['chatid']=='owner' for x in gateway.sends)
@@ -134,9 +135,58 @@ async def test_adjacent_callbacks_merge_once_and_wait_for_download(state_env,gat
         await asyncio.sleep(.2)
         assert len(gateway.sends)==1 and len(calls)==(0 if fail else 1)
         rows=list(d.automation.jobs.db.execute('SELECT * FROM jobs ORDER BY id'))
-        assert rows[0]['state']=='sent' and rows[1]['state']=='merged'
-        assert rows[1]['merged_into']==rows[0]['id']
-        assert rows[0]['outcome']==('blocked' if fail else 'success')
+        if fail or text_first:
+            assert rows[0]['state']=='sent' and rows[1]['state']=='merged'
+            assert rows[1]['merged_into']==rows[0]['id']
+            assert rows[0]['outcome']==('blocked' if fail else 'success')
+        else:
+            assert rows[0]['state']=='stored' and rows[1]['state']=='sent'
+            assert rows[1]['outcome']=='success'
+    finally:
+        await asyncio.gather(*list(d._attachment_tasks),return_exceptions=True)
+        await d.automation.close();await d.client.stop();d.store.close()
+
+
+def test_context_snapshot_contains_history_and_quote_without_cross_chat(tmp_path):
+    j=Jobs(tmp_path/'tasks.sqlite')
+    for ident,chat,owner,prompt in [(1,'A','owner','记住项目代号青山'),(2,'B','owner','别的群秘密'),
+        (3,'A','other','别人的秘密'),(4,'A','owner','项目代号是什么'),(5,'A','owner','未来任务')]:
+        b={'aibotid':'bot','msgid':str(ident),'chattype':'group','chatid':chat,'from':{'userid':owner},'msgtype':'text'}
+        if ident==4:b['quote']={'msgtype':'text','text':{'content':'请参考上次回复'}}
+        j.enqueue(ident,b,prompt)
+    j.update(1,'sent','已记住青山')
+    job=j.db.execute('SELECT * FROM jobs WHERE id=4').fetchone()
+    ctx=j.context(job)
+    assert len(ctx['recent_messages'])==1
+    assert ctx['recent_messages'][0]['assistant']=='已记住青山'
+    assert ctx['current_quote']=='请参考上次回复'
+    assert j.db.execute('SELECT context_snapshot FROM jobs WHERE id=4').fetchone()[0]
+    j.db.close()
+
+
+async def test_file_alone_stored_without_cli_then_later_instruction(state_env,gateway,monkeypatch):
+    d=await start_daemon(gateway,auto_enabled=True,owner_userid='owner',ai_message_window=.1)
+    calls=[]
+    async def download(*args,**kwargs):
+        p=state_env['root']/'later.txt';p.write_text('delayed-attachment');return p
+    async def run(cfg,jobs,job):
+        context=jobs.context(job)
+        assert context['recent_messages'][0]['outcome']=='attachment_ready'
+        assert Path(context['attachments'][0]['files'][0]['path']).read_text()=='delayed-attachment'
+        calls.append(job['id']);return '已读附件'
+    monkeypatch.setattr('wecom_bot.daemon.download_and_decrypt',download)
+    monkeypatch.setattr('wecom_bot.automation.run_ai',run)
+    d.automation.start()
+    try:
+        await gateway.push_callback({'aibotid':gateway.bot_id,'msgid':'late-file','chattype':'single',
+            'from':{'userid':'owner'},'msgtype':'file','file':{'url':'https://example.test/file','aeskey':'fake'}})
+        await until(lambda:d.automation.jobs.status().get('stored')==1)
+        await asyncio.sleep(.3)
+        assert not calls and not gateway.sends
+        assert '附件已接收' in gateway.responds[0]['body']['stream']['content']
+        await gateway.push_text('读取刚才的附件',userid='owner')
+        await until(lambda:len(gateway.sends)==1)
+        assert calls==[2]
     finally:
         await asyncio.gather(*list(d._attachment_tasks),return_exceptions=True)
         await d.automation.close();await d.client.stop();d.store.close()

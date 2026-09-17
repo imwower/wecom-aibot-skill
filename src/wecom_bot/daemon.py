@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 import logging
 import os
 import signal
@@ -111,6 +112,8 @@ class Daemon:
                         if len(summary) > budget:
                             summary = summary[:budget - 1] + '…'
                         ack_text = prefix + summary + suffix
+                        if body.get('msgtype') in ('file', 'image', 'video'):
+                            ack_text = '附件已接收，正在保存。请直接发送处理要求，我会结合上下文处理。'
                         frame = P.respond_frame(req_id, P.stream_body(P.generate_req_id('ack'),
                             ack_text, finish=True))
                         await self.client.send_and_wait(frame)
@@ -144,7 +147,9 @@ class Daemon:
             for index, ref in enumerate(refs):
                 path = await download_and_decrypt(ref['url'], ref.get('aeskey', ''), paths.media_dir(),
                     kind=ref['kind'], msgid=f'{row_id}-{index}')
-                files.append({'path': str(path), 'kind': ref['kind']})
+                files.append({'path': str(path), 'kind': ref['kind'], 'name': path.name,
+                              'size': path.stat().st_size,
+                              'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
             return files
         try:
             if not self.cfg.download_media or not refs or len(refs) > 10:
@@ -152,7 +157,12 @@ class Daemon:
             files = await asyncio.wait_for(download(), 120)
             jobs.attach(row_id, files)
             self.store.set_media_path(row_id, files[0]['path'])
-            jobs.update(row_id, 'queued')
+            kind = jobs.db.execute('SELECT input_kind FROM jobs WHERE id=?', (row_id,)).fetchone()[0]
+            if kind in ('file', 'image', 'video'):
+                jobs.execution(row_id, outcome='attachment_ready', finished_at=time.time())
+                jobs.update(row_id, 'stored')
+            else:
+                jobs.update(row_id, 'queued')
         except (Exception, asyncio.CancelledError) as exc:
             jobs.execution(row_id, outcome='blocked', finished_at=time.time(), error_kind='attachment_download')
             jobs.update(row_id, 'ready', '附件下载未完成（链接可能已失效、文件过大或下载被关闭），请重新发送；本次未执行附件中的任何操作。')

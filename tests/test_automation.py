@@ -63,7 +63,7 @@ def fake_cli(tmp_path):
     p.write_text('#!' + sys.executable + '''
 import sys,json,time,subprocess
 from pathlib import Path
-prompt=sys.stdin.read()
+prompt=sys.stdin.read().split(chr(10)+'以下是同一会话',1)[0]
 Path('args.json').write_text(json.dumps(sys.argv))
 sid=sys.argv[sys.argv.index('resume')+1] if 'resume' in sys.argv else 'test-session'
 print(json.dumps({'type':'thread.started','thread_id':sid}),flush=True)
@@ -239,7 +239,7 @@ def test_upgrade_old_database_preserves_results(tmp_path):
 async def test_claude_resume_and_codex_sessions_are_separate(tmp_path):
     from wecom_bot.runners import session_key
     p=tmp_path/'claude'
-    p.write_text('#!'+sys.executable+'''\nimport sys,json\nfrom pathlib import Path\nprompt=sys.stdin.read()\nPath('claude-args.json').write_text(json.dumps(sys.argv))\nsid=sys.argv[sys.argv.index('--resume')+1] if '--resume' in sys.argv else 'claude-session'\nprint(json.dumps({'type':'system','subtype':'init','session_id':sid}),flush=True)\nprint(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':sid,'structured_output':{'outcome':'blocked' if 'BLOCKED' in prompt else 'success','message':'Claude 完成'}}),flush=True)\n''')
+    p.write_text('#!'+sys.executable+'''\nimport sys,json\nfrom pathlib import Path\nprompt=sys.stdin.read().split(chr(10)+'以下是同一会话',1)[0]\nPath('claude-args.json').write_text(json.dumps(sys.argv))\nsid=sys.argv[sys.argv.index('--resume')+1] if '--resume' in sys.argv else 'claude-session'\nprint(json.dumps({'type':'system','subtype':'init','session_id':sid}),flush=True)\nprint(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':sid,'structured_output':{'outcome':'blocked' if 'BLOCKED' in prompt else 'success','message':'Claude 完成'}}),flush=True)\n''')
     p.chmod(0o755)
     cfg=Config(ai_provider='claude',ai_executable=str(p),ai_cwd=str(tmp_path))
     jobs=Jobs(tmp_path/'tasks.sqlite');job=queued(jobs)
@@ -263,3 +263,17 @@ def test_runner_permissions_and_bad_events():
         args=command(cfg,'sid');assert flag in args and 'example-model' in args
     assert events('claude',{'type':'result','subtype':'error_during_execution','is_error':True})==[('failed',None)]
     assert events('claude',None)==[]
+
+
+def test_assistant_prompt_can_be_customized_and_reloaded(tmp_path):
+    from wecom_bot.automation import assistant_instructions
+    cfg=Config()
+    assert '聊天历史与附件' in assistant_instructions(cfg)
+    p=tmp_path/'assistant.md';p.write_text('回复风格：简短中文')
+    cfg.ai_prompt_file=str(p)
+    assert assistant_instructions(cfg)=='回复风格：简短中文'
+    p.write_text('回复风格：详细说明')
+    assert assistant_instructions(cfg)=='回复风格：详细说明'
+    p.unlink()
+    with pytest.raises(RuntimeError,match='提示词文件'):
+        assistant_instructions(cfg)

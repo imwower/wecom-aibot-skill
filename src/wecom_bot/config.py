@@ -52,6 +52,7 @@ class Config:
     ai_timeout: float = 900.0
     ai_idle_timeout: float = 300.0
     ai_message_window: float = 3.0  # 相邻附件和文字回调的合并等待秒数
+    ai_prompt_file: str = ""  # 空值使用内置提示词；可指定自己的 Markdown 文件
 
     def with_env_overrides(self) -> "Config":
         """应用环境变量覆盖（只覆盖敏感/易变项）。"""
