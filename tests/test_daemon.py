@@ -382,3 +382,101 @@ async def test_http_token_required_when_configured(state_env, gateway):
     finally:
         await client.close()
         await stop_daemon(d)
+
+
+# ---------------- 图片：分片上传 + 主动推送 ----------------
+
+
+PNG_1PX = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
+async def test_send_image_uploads_then_pushes(state_env, gateway, tmp_path):
+    d = await start_daemon(gateway)
+    try:
+        await gateway.push_text("你好")
+        for _ in range(100):
+            if d.store.last_chat():
+                break
+            await asyncio.sleep(0.05)
+
+        img = tmp_path / "qrcode.png"
+        img.write_bytes(PNG_1PX * 20)          # 仍是 1 片
+        res = await d.do_send_media(img, kind="image")
+
+        assert res["msgtype"] == "image"
+        assert res["media_id"].startswith("media_")
+        assert res["total_chunks"] == 1
+
+        # 网关侧：素材内容与本地一致
+        up = [u for u in gateway.uploads.values() if u.get("media_id") == res["media_id"]]
+        assert len(up) == 1 and up[0]["data"] == img.read_bytes()
+        assert up[0]["init"]["type"] == "image"
+        assert up[0]["init"]["filename"] == "qrcode.png"
+
+        # 发送帧走 image + media_id
+        body = gateway.sends[-1]["body"]
+        assert body["msgtype"] == "image"
+        assert body["image"] == {"media_id": res["media_id"]}
+        assert body["chatid"] == res["chat_id"]
+
+        # sent 表记 msgtype=image
+        row = dict(d.store._conn.execute("SELECT * FROM sent ORDER BY id DESC LIMIT 1").fetchone())
+        assert row["msgtype"] == "image" and row["ok"] == 1
+        assert res["media_id"] in row["content"]
+    finally:
+        await stop_daemon(d)
+
+
+async def test_send_image_multi_chunk(state_env, gateway, tmp_path):
+    d = await start_daemon(gateway)
+    try:
+        await gateway.push_text("你好")
+        for _ in range(100):
+            if d.store.last_chat():
+                break
+            await asyncio.sleep(0.05)
+
+        big = tmp_path / "big.png"
+        big.write_bytes(PNG_1PX + os.urandom(600 * 1024))
+        res = await d.do_send_media(big, kind="image")
+        assert res["total_chunks"] == 2
+        up = [u for u in gateway.uploads.values() if u.get("media_id") == res["media_id"]][0]
+        assert up["data"] == big.read_bytes()
+    finally:
+        await stop_daemon(d)
+
+
+async def test_send_image_rejects_bad_format(state_env, gateway, tmp_path):
+    d = await start_daemon(gateway)
+    try:
+        bad = tmp_path / "x.bmp"
+        bad.write_bytes(b"BM" + b"0" * 100)
+        with pytest.raises(ValueError):
+            d.media_plan(bad, "image")
+    finally:
+        await stop_daemon(d)
+
+
+async def test_http_send_image_dry_run(state_env, gateway, tmp_path):
+    d = await start_daemon(gateway)
+    try:
+        img = tmp_path / "dry.png"
+        img.write_bytes(PNG_1PX * 20)
+        client = TestClient(TestServer(d.build_app()))
+        await client.start_server()
+        try:
+            r = await client.post("/send", json={"image": str(img), "chat_id": "C1", "dry_run": True})
+            payload = await r.json()
+        finally:
+            await client.close()
+        assert payload["dry_run"] is True
+        assert payload["msgtype"] == "image"
+        assert payload["media"]["filename"] == "dry.png"
+        assert payload["media"]["total_chunks"] == 1
+        assert "base64_data" not in json.dumps(payload)
+        assert not gateway.uploads          # dry-run 不碰长连接
+    finally:
+        await stop_daemon(d)

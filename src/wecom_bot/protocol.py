@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import time
 from typing import Any, Dict, Optional
@@ -20,6 +22,9 @@ CMD_RESPOND_MSG = "aibot_respond_msg"      # 回复消息（含流式）
 CMD_RESPOND_WELCOME = "aibot_respond_welcome_msg"
 CMD_RESPOND_UPDATE = "aibot_respond_update_msg"
 CMD_SEND_MSG = "aibot_send_msg"            # 主动推送
+CMD_UPLOAD_MEDIA_INIT = "aibot_upload_media_init"      # 分片上传：初始化
+CMD_UPLOAD_MEDIA_CHUNK = "aibot_upload_media_chunk"    # 分片上传：传分片
+CMD_UPLOAD_MEDIA_FINISH = "aibot_upload_media_finish"  # 分片上传：合并取 media_id
 
 # ---- 企业微信 → 开发者 ----
 CMD_MSG_CALLBACK = "aibot_msg_callback"
@@ -37,6 +42,22 @@ CHATTYPE_GROUP = "group"
 REPLY_DEADLINE = 5.0          # 收到回调后需在 5 秒内回复
 STREAM_MAX_WINDOW = 600.0     # 流式消息 10 分钟内必须 finish
 MARKDOWN_MAX_BYTES = 20480    # markdown content 上限
+
+# 临时素材分片上传（官方：单片 512KB（base64 前），最多 100 片，素材 3 天有效）
+MEDIA_CHUNK_BYTES = 512 * 1024
+MEDIA_MAX_CHUNKS = 100
+MEDIA_MIN_BYTES = 5
+MEDIA_MAX_BYTES = {
+    "image": 10 * 1024 * 1024,
+    "voice": 2 * 1024 * 1024,
+    "video": 10 * 1024 * 1024,
+    "file": 20 * 1024 * 1024,
+}
+MEDIA_EXTS = {
+    "image": {".png", ".jpg", ".jpeg", ".gif"},
+    "voice": {".amr"},
+    "video": {".mp4"},
+}
 
 
 def generate_req_id(prefix: str) -> str:
@@ -77,6 +98,102 @@ def markdown_body(content: str) -> Dict[str, Any]:
 
 def text_body(content: str) -> Dict[str, Any]:
     return {"msgtype": "text", "text": {"content": content}}
+
+
+def image_body(media_id: str) -> Dict[str, Any]:
+    return {"msgtype": "image", "image": {"media_id": media_id}}
+
+
+def media_body(kind: str, media_id: str, **extra: Any) -> Dict[str, Any]:
+    """file / image / voice / video 统一形如 {"msgtype": kind, kind: {"media_id": ...}}。"""
+    node: Dict[str, Any] = {"media_id": media_id}
+    node.update({k: v for k, v in extra.items() if v is not None})
+    return {"msgtype": kind, kind: node}
+
+
+def upload_media_init_frame(
+    kind: str,
+    filename: str,
+    total_size: int,
+    total_chunks: int,
+    md5: Optional[str] = None,
+    req_id: Optional[str] = None,
+) -> WsFrame:
+    body: Dict[str, Any] = {
+        "type": kind,
+        "filename": filename,
+        "total_size": total_size,
+        "total_chunks": total_chunks,
+    }
+    if md5:
+        body["md5"] = md5
+    return {
+        "cmd": CMD_UPLOAD_MEDIA_INIT,
+        "headers": {"req_id": req_id or generate_req_id(CMD_UPLOAD_MEDIA_INIT)},
+        "body": body,
+    }
+
+
+def upload_media_chunk_frame(
+    upload_id: str, chunk_index: int, chunk: bytes, req_id: Optional[str] = None
+) -> WsFrame:
+    return {
+        "cmd": CMD_UPLOAD_MEDIA_CHUNK,
+        "headers": {"req_id": req_id or generate_req_id(CMD_UPLOAD_MEDIA_CHUNK)},
+        "body": {
+            "upload_id": upload_id,
+            "chunk_index": chunk_index,
+            "base64_data": base64.b64encode(chunk).decode("ascii"),
+        },
+    }
+
+
+def upload_media_finish_frame(upload_id: str, req_id: Optional[str] = None) -> WsFrame:
+    return {
+        "cmd": CMD_UPLOAD_MEDIA_FINISH,
+        "headers": {"req_id": req_id or generate_req_id(CMD_UPLOAD_MEDIA_FINISH)},
+        "body": {"upload_id": upload_id},
+    }
+
+
+def split_chunks(data: bytes, chunk_size: int = MEDIA_CHUNK_BYTES) -> list:
+    """按 base64 编码前的字节切片；空文件返回一个空片以保证 total_chunks>=1。"""
+    if not data:
+        return [b""]
+    return [data[i : i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+
+def media_upload_plan(
+    data: bytes, filename: str, kind: str = "image", chunk_size: int = MEDIA_CHUNK_BYTES
+) -> Dict[str, Any]:
+    """按官方字段算出 init 需要的参数（不含 base64 内容，可直接打印给用户看）。"""
+    chunks = split_chunks(data, chunk_size)
+    return {
+        "type": kind,
+        "filename": filename,
+        "total_size": len(data),
+        "total_chunks": len(chunks),
+        "md5": hashlib.md5(data).hexdigest(),
+    }
+
+
+def validate_media(data: bytes, filename: str, kind: str = "image") -> None:
+    """按官方限制做本地预检，避免白跑一趟长连接。"""
+    if kind not in MEDIA_MAX_BYTES:
+        raise ValueError(f"不支持的素材类型 {kind}（支持 image/voice/video/file）")
+    exts = MEDIA_EXTS.get(kind)
+    if exts:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in exts:
+            raise ValueError(f"{kind} 只支持 {'/'.join(sorted(exts))}，拿到的是 {ext or '无扩展名'}")
+    if len(data) < MEDIA_MIN_BYTES:
+        raise ValueError(f"文件太小（{len(data)} 字节），至少 {MEDIA_MIN_BYTES} 字节")
+    limit = MEDIA_MAX_BYTES[kind]
+    if len(data) > limit:
+        raise ValueError(f"{kind} 不能超过 {limit // (1024 * 1024)}MB，当前 {len(data) / 1048576:.2f}MB")
+    total_chunks = len(split_chunks(data))
+    if total_chunks > MEDIA_MAX_CHUNKS:
+        raise ValueError(f"分片数 {total_chunks} 超过上限 {MEDIA_MAX_CHUNKS}")
 
 
 def respond_frame(req_id: str, body: Dict[str, Any], cmd: str = CMD_RESPOND_MSG) -> WsFrame:

@@ -55,7 +55,7 @@ bin/wecom setup --secret-env WECOM_BOT_SECRET                          # 从环�
 | `wecom status` | daemon 与长连接状态；未运行时退出码 3 |
 | `wecom read [--unread][--since ISO/epoch][--since-id N][--limit N][--kind message\|event][--mark-read][--raw]` | 读收件箱 |
 | `wecom wait [--timeout 秒][--new-only][--since-id N][--mark-read]` | 阻塞等新消息；超时退出码 4 |
-| `wecom send --text ... [--to chat_id][--text-file F][--dry-run]` | 主动推送 |
+| `wecom send --text ... [--image F.png][--to chat_id][--text-file F][--dry-run]` | 主动推送；`--image` 发本地图片（png/jpg/jpeg/gif，≤10MB），可与 `--text` 同时给（先图后文，各算一条） |
 | `wecom reply --to <收件箱id或msgid> --text ... [--dry-run]` | 回复某条消息 |
 | `wecom mark-read <id>` | 标记已读 |
 | `wecom daemon start\|stop\|restart\|logs [--foreground][-f][-n N]` | 管理常驻进程 |
@@ -72,6 +72,19 @@ bin/wecom setup --secret-env WECOM_BOT_SECRET                          # 从环�
 
 `reply` 的返回里 `route` 字段说明实际走了哪条。
 
+### 图片消息（`--image`）
+
+官方只支持 `media_id`，不收 base64 图片体，所以 `wecom send --image` 分两步走：
+
+1. 走长连接分片上传临时素材：`aibot_upload_media_init`（`type/filename/total_size/total_chunks/md5`）
+   → `aibot_upload_media_chunk`（`upload_id/chunk_index/base64_data`，单片 512KB（base64 前）、最多 100 片）
+   → `aibot_upload_media_finish` 拿 `media_id`（3 天有效）。
+2. 再发 `aibot_send_msg`：`{"chatid": ..., "chat_type": 1, "msgtype": "image", "image": {"media_id": ...}}`。
+
+图片限 png/jpg/jpeg/gif、≤10MB（语音 amr ≤2MB、视频 mp4 ≤10MB、普通文件 ≤20MB，已在
+`protocol.validate_media` 里预检）。`--dry-run` 只打印文件名/大小/md5/分片数与帧序，不打印 base64。
+`sent` 表里这条记 `msgtype=image`、`content=[image] 文件名 media_id=...`。
+
 ## 本地 HTTP 接口
 
 只监听 `127.0.0.1:47632`（可配 `http_port`；配了 `http_token` 则请求需带 `X-Wecom-Token`）。
@@ -82,7 +95,7 @@ bin/wecom setup --secret-env WECOM_BOT_SECRET                          # 从环�
 | GET | `/messages?since=&since_id=&unread=1&limit=&kind=&mark_read=1&raw=1` | 读收件箱 |
 | POST | `/messages/{id或msgid}/read` | 标记已读 |
 | GET | `/wait?timeout=&since_id=&unread=&mark_read=` | 长轮询等新消息 |
-| POST | `/send` `{text, chat_id?, chattype?, dry_run?}` | 主动推送 |
+| POST | `/send` `{text?, image?, media_type?, chat_id?, chattype?, dry_run?}` | 主动推送；`image` 为本地绝对路径 |
 | POST | `/reply` `{msg_id, text, dry_run?}` | 回复某条 |
 | POST | `/shutdown` | 优雅退出 |
 

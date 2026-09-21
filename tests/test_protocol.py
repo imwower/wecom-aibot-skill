@@ -89,3 +89,55 @@ def test_decrypt_roundtrip():
     aeskey = base64.b64encode(key).decode().rstrip("=")  # 模拟无 padding 的 base64
     plain = b"hello \xe4\xbd\xa0\xe5\xa5\xbd" * 40
     assert decrypt(_encrypt(plain, key), aeskey) == plain
+
+
+# ---------------- 图片消息与临时素材分片上传 ----------------
+
+
+def test_image_body_and_send_frame():
+    f = P.send_msg_frame("CHAT", P.image_body("MEDIA_ID"), P.CHAT_TYPE_SINGLE)
+    assert f["cmd"] == "aibot_send_msg"
+    assert f["body"] == {
+        "chatid": "CHAT", "chat_type": 1,
+        "msgtype": "image", "image": {"media_id": "MEDIA_ID"},
+    }
+
+
+def test_upload_frames_shape():
+    init = P.upload_media_init_frame("image", "a.png", 1000, 1, "MD5")
+    assert init["cmd"] == "aibot_upload_media_init"
+    assert init["body"] == {
+        "type": "image", "filename": "a.png", "total_size": 1000,
+        "total_chunks": 1, "md5": "MD5",
+    }
+    chunk = P.upload_media_chunk_frame("UP", 0, b"ab")
+    assert chunk["cmd"] == "aibot_upload_media_chunk"
+    assert chunk["body"] == {"upload_id": "UP", "chunk_index": 0, "base64_data": "YWI="}
+    fin = P.upload_media_finish_frame("UP")
+    assert fin["cmd"] == "aibot_upload_media_finish"
+    assert fin["body"] == {"upload_id": "UP"}
+
+
+def test_media_upload_plan_and_split():
+    data = b"\x89PNG" + os.urandom(P.MEDIA_CHUNK_BYTES * 2 + 7)
+    chunks = P.split_chunks(data)
+    assert len(chunks) == 3
+    assert all(len(c) <= P.MEDIA_CHUNK_BYTES for c in chunks)
+    assert b"".join(chunks) == data
+    plan = P.media_upload_plan(data, "big.png")
+    assert plan["type"] == "image"
+    assert plan["total_size"] == len(data)
+    assert plan["total_chunks"] == 3
+    assert len(plan["md5"]) == 32
+
+
+def test_validate_media_rules():
+    import pytest
+
+    P.validate_media(b"x" * 100, "ok.png", "image")
+    with pytest.raises(ValueError):
+        P.validate_media(b"x" * 100, "bad.bmp", "image")       # 扩展名不支持
+    with pytest.raises(ValueError):
+        P.validate_media(b"x", "tiny.png", "image")            # 小于 5 字节
+    with pytest.raises(ValueError):
+        P.validate_media(b"x" * (10 * 1024 * 1024 + 1), "big.png", "image")  # 超 10MB

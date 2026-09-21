@@ -212,15 +212,54 @@ def cmd_wait(args: argparse.Namespace) -> int:
 
 def cmd_send(args: argparse.Namespace) -> int:
     cfg = load_config(required=False)
-    text = _read_text(args)
-    res = _request(
-        cfg, "POST", "/send",
-        body={"text": text, "chat_id": args.to, "markdown": args.markdown, "dry_run": args.dry_run},
-    )
-    if res.get("dry_run"):
-        _out(args, res, f"[dry-run] 目标 {res.get('chat_id')}\n---\n{text}\n---")
-        return 0
-    _out(args, res, f"已发送（{res.get('route')}）→ {res.get('chat_id')}")
+    image = None
+    if getattr(args, "image", None):
+        p = Path(args.image).expanduser()
+        if not p.exists():
+            raise CliError(f"图片不存在：{p}")
+        image = str(p.resolve())
+    text = _read_text(args) if (args.text or args.text_file) else None
+    if not image and not text:
+        raise CliError("缺少 --text / --text-file 或 --image")
+
+    results: List[Dict[str, Any]] = []
+    lines: List[str] = []
+
+    if image:
+        res = _request(
+            cfg, "POST", "/send",
+            body={"image": image, "chat_id": args.to, "dry_run": args.dry_run},
+            timeout=180.0,
+        )
+        results.append(res)
+        if res.get("dry_run"):
+            m = res.get("media") or {}
+            lines.append(
+                f"[dry-run] 目标 {res.get('chat_id')} msgtype=image\n"
+                f"  文件 {m.get('filename')}  {m.get('total_size')} 字节  md5={m.get('md5')}  "
+                f"分片 {m.get('total_chunks')}\n"
+                f"  帧序 {' -> '.join(res.get('frames') or [])}"
+            )
+        else:
+            lines.append(
+                f"已发送图片（{res.get('route')}）→ {res.get('chat_id')}  "
+                f"media_id={res.get('media_id')}"
+            )
+
+    if text:
+        res = _request(
+            cfg, "POST", "/send",
+            body={"text": text, "chat_id": args.to, "markdown": args.markdown,
+                  "dry_run": args.dry_run},
+        )
+        results.append(res)
+        if res.get("dry_run"):
+            lines.append(f"[dry-run] 目标 {res.get('chat_id')} msgtype=markdown\n---\n{text}\n---")
+        else:
+            lines.append(f"已发送（{res.get('route')}）→ {res.get('chat_id')}")
+
+    payload = results[0] if len(results) == 1 else {"results": results}
+    _out(args, payload, "\n".join(lines))
     return 0
 
 
@@ -415,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("send", help="主动推送消息（需要用户先与机器人互动过）")
     p.add_argument("--text")
     p.add_argument("--text-file", help="从文件读正文，- 表示 stdin")
+    p.add_argument("--image", help="本地图片路径（png/jpg/jpeg/gif，≤10MB）；可与 --text 同时给，先图后文，各算一条")
     p.add_argument("--markdown", action="store_true", default=True)
     p.add_argument("--to", help="chat_id；缺省用最近互动的会话")
     p.add_argument("--dry-run", action="store_true")

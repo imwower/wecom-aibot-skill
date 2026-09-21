@@ -32,6 +32,7 @@ $W reply --to 17 --text "查到了：..."     # 回复收件箱里第 17 条
 $W send --text "联调结论：..." --dry-run  # 先给用户看
 $W send --text "联调结论：..."            # 用户确认后再真发
 $W send --to <chat_id> --text "..."       # 指定会话；缺省用最近互动的那个
+$W send --to <chat_id> --image ~/a.png --text "说明"   # 发图片（png/jpg/jpeg/gif ≤10MB，先图后文各算一条）
 $W daemon start|stop|restart|logs
 ```
 
@@ -48,6 +49,8 @@ $W daemon start|stop|restart|logs
    `wecom send` 也走这条。前提是用户先和机器人互动过，且受 30 条/分钟的限制。
 
 `reply` 输出里的 `route` 字段告诉你实际走了哪条。
+
+图片走「上传临时素材拿 media_id → `aibot_send_msg` 发 `msgtype=image`」两步，由 daemon 内部完成；`--dry-run` 只给文件名/大小/md5/分片数，不打印 base64。
 
 ## 边界
 

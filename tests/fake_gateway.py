@@ -6,12 +6,15 @@
   - 主动下推 aibot_msg_callback / aibot_event_callback
   - 校验 aibot_respond_msg（含流式 stream id / finish / 10 分钟窗口）
   - 校验 aibot_send_msg（主动推送）
+  - 临时素材分片上传 aibot_upload_media_init / _chunk / _finish
   - 模拟「同一 bot 只能一条长连接」：新连接踢掉旧连接
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import time
 import uuid
@@ -27,6 +30,11 @@ ERR_BAD_REQ_ID = 40003
 ERR_STREAM_FINISHED = 40004
 ERR_STREAM_EXPIRED = 40005
 ERR_NO_INTERACTION = 40006
+ERR_UPLOAD_UNKNOWN = 40010
+ERR_UPLOAD_INCOMPLETE = 40011
+ERR_UPLOAD_MD5 = 40012
+ERR_UPLOAD_CHUNK_TOO_BIG = 40013
+ERR_UPLOAD_TOO_MANY_CHUNKS = 40014
 
 
 @dataclass
@@ -67,6 +75,7 @@ class FakeGateway:
 
         # req_id -> 流状态
         self.streams: Dict[str, StreamState] = {}
+        self.uploads: Dict[str, Dict[str, Any]] = {}
         self.callback_req_ids: set = set()
         self.authed = asyncio.Event()
         self.any_frame = asyncio.Event()
@@ -175,6 +184,50 @@ class FakeGateway:
                 await self._reply(ws, req_id, 40007, "missing chatid")
                 return
             await self._reply(ws, req_id, 0, "ok")
+            return
+
+        if cmd == "aibot_upload_media_init":
+            if body.get("total_chunks", 0) > 100:
+                await self._reply(ws, req_id, ERR_UPLOAD_TOO_MANY_CHUNKS, "too many chunks")
+                return
+            upload_id = f"up_{uuid.uuid4().hex[:12]}"
+            self.uploads[upload_id] = {"init": dict(body), "chunks": {}}
+            await self._reply(ws, req_id, 0, "ok", {"upload_id": upload_id})
+            return
+
+        if cmd == "aibot_upload_media_chunk":
+            up = self.uploads.get(body.get("upload_id"))
+            if up is None:
+                await self._reply(ws, req_id, ERR_UPLOAD_UNKNOWN, "unknown upload_id")
+                return
+            raw = base64.b64decode(body.get("base64_data") or "")
+            if len(raw) > 512 * 1024:
+                await self._reply(ws, req_id, ERR_UPLOAD_CHUNK_TOO_BIG, "chunk too big")
+                return
+            up["chunks"][int(body.get("chunk_index"))] = raw
+            await self._reply(ws, req_id, 0, "ok")
+            return
+
+        if cmd == "aibot_upload_media_finish":
+            up = self.uploads.get(body.get("upload_id"))
+            if up is None:
+                await self._reply(ws, req_id, ERR_UPLOAD_UNKNOWN, "unknown upload_id")
+                return
+            init = up["init"]
+            if len(up["chunks"]) != init.get("total_chunks"):
+                await self._reply(ws, req_id, ERR_UPLOAD_INCOMPLETE, "missing chunks")
+                return
+            data = b"".join(up["chunks"][i] for i in sorted(up["chunks"]))
+            if init.get("md5") and hashlib.md5(data).hexdigest() != init["md5"]:
+                await self._reply(ws, req_id, ERR_UPLOAD_MD5, "md5 mismatch")
+                return
+            up["data"] = data
+            up["media_id"] = f"media_{uuid.uuid4().hex}"
+            await self._reply(ws, req_id, 0, "ok", {
+                "type": init.get("type"),
+                "media_id": up["media_id"],
+                "created_at": str(int(time.time())),
+            })
             return
 
         await self._reply(ws, req_id, 40000, f"unsupported cmd {cmd}")

@@ -7,6 +7,7 @@ HTTP 只监听 127.0.0.1。
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import hashlib
 import logging
@@ -260,6 +261,107 @@ class Daemon:
         res["fallback_from"] = "stream"
         return res
 
+    def _resolve_chat(
+        self, chat_id: Optional[str], chattype: Optional[str]
+    ) -> tuple:
+        """缺省用最近互动过的会话。"""
+        if chat_id:
+            return chat_id, chattype
+        last = self.store.last_chat() or {}
+        chat_id = last.get("chatid")
+        chattype = chattype or last.get("chattype")
+        if not chat_id:
+            raise RuntimeError(
+                "没有可用的会话：还没有人和机器人说过话，也没有指定 --to <chat_id>"
+            )
+        return chat_id, chattype
+
+    # ---------- 临时素材（分片上传） ----------
+
+    def media_plan(self, path: Path, kind: str = "image") -> Dict[str, Any]:
+        """读文件并算出上传计划；校验不过直接抛 ValueError。不含 base64 内容。"""
+        if not path.exists():
+            raise ValueError(f"文件不存在：{path}")
+        data = path.read_bytes()
+        P.validate_media(data, path.name, kind)
+        plan = P.media_upload_plan(data, path.name, kind)
+        plan["path"] = str(path)
+        return plan
+
+    async def upload_media(self, path: Path, kind: str = "image") -> Dict[str, Any]:
+        """aibot_upload_media_init → chunk × N → finish，返回 {media_id, ...}。"""
+        if not self.client.authenticated:
+            raise NotConnected("长连接未就绪，无法上传素材")
+        data = path.read_bytes()
+        P.validate_media(data, path.name, kind)
+        plan = P.media_upload_plan(data, path.name, kind)
+        timeout = max(30.0, self.cfg.ack_timeout)
+
+        ack = await self.client.send_and_wait(
+            P.upload_media_init_frame(
+                kind, plan["filename"], plan["total_size"], plan["total_chunks"], plan["md5"]
+            ),
+            timeout=timeout,
+        )
+        upload_id = ((ack.get("body") or {}).get("upload_id") or "")
+        if not upload_id:
+            raise RuntimeError(f"上传初始化没拿到 upload_id：{ack}")
+
+        for index, chunk in enumerate(P.split_chunks(data)):
+            await self.client.send_and_wait(
+                P.upload_media_chunk_frame(upload_id, index, chunk), timeout=timeout
+            )
+
+        ack = await self.client.send_and_wait(
+            P.upload_media_finish_frame(upload_id), timeout=timeout
+        )
+        body = ack.get("body") or {}
+        media_id = body.get("media_id")
+        if not media_id:
+            raise RuntimeError(f"上传完成没拿到 media_id：{ack}")
+        log.info("素材上传成功 %s kind=%s 分片=%s media_id=%s",
+                 path.name, kind, plan["total_chunks"], media_id)
+        return {"media_id": media_id, "upload_id": upload_id, **plan}
+
+    async def do_send_media(
+        self,
+        path: Path,
+        *,
+        kind: str = "image",
+        chat_id: Optional[str] = None,
+        chattype: Optional[str] = None,
+        reply_to: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """先把本地文件传成临时素材，再用 aibot_send_msg 推 media 消息。"""
+        chat_id, chattype = self._resolve_chat(chat_id, chattype)
+        if self._rate_limited():
+            raise RuntimeError("达到 30 条/分钟的发送频率上限，稍后再试")
+        if not self.client.authenticated:
+            raise NotConnected("长连接未就绪，无法发送")
+
+        up = await self.upload_media(path, kind)
+        content = f"[{kind}] {up['filename']} media_id={up['media_id']}"
+        frame = P.send_msg_frame(
+            chat_id, P.media_body(kind, up["media_id"]), P.chat_type_from_chattype(chattype)
+        )
+        try:
+            await self.client.send_and_wait(frame)
+        except Exception as e:
+            self.store.add_sent(
+                route="send_msg", chatid=chat_id, reply_to=reply_to, msgtype=kind,
+                content=content, ok=False, errcode=getattr(e, "errcode", None), errmsg=str(e),
+            )
+            raise
+        self.store.add_sent(
+            route="send_msg", chatid=chat_id, reply_to=reply_to, msgtype=kind,
+            content=content, ok=True,
+        )
+        return {
+            "route": "send_msg", "chat_id": chat_id, "chat_type": chattype,
+            "msgtype": kind, "media_id": up["media_id"], "filename": up["filename"],
+            "total_size": up["total_size"], "total_chunks": up["total_chunks"], "md5": up["md5"],
+        }
+
     async def do_send(
         self,
         text: str,
@@ -270,14 +372,7 @@ class Daemon:
         reply_to: Optional[str] = None,
     ) -> Dict[str, Any]:
         """主动推送（aibot_send_msg）。需要用户此前与机器人互动过。"""
-        if not chat_id:
-            last = self.store.last_chat() or {}
-            chat_id = last.get("chatid")
-            chattype = chattype or last.get("chattype")
-            if not chat_id:
-                raise RuntimeError(
-                    "没有可用的会话：还没有人和机器人说过话，也没有指定 --to <chat_id>"
-                )
+        chat_id, chattype = self._resolve_chat(chat_id, chattype)
         if self._rate_limited():
             raise RuntimeError("达到 30 条/分钟的发送频率上限，稍后再试")
         if not self.client.authenticated:
@@ -429,14 +524,19 @@ class Daemon:
     async def h_send(self, request: web.Request) -> web.Response:
         data = await _json_body(request)
         text = data.get("text") or ""
+        media_path = data.get("media") or data.get("image")
+        kind = data.get("media_type") or ("image" if data.get("image") else "file")
+        if media_path:
+            return await self._send_media_response(data, Path(media_path).expanduser(), kind)
         if not text.strip():
-            return web.json_response({"error": "text 不能为空"}, status=400)
+            return web.json_response({"error": "text / image 至少给一个"}, status=400)
         if data.get("dry_run"):
             last = self.store.last_chat() or {}
             return web.json_response(
                 {
                     "dry_run": True,
                     "chat_id": data.get("chat_id") or last.get("chatid"),
+                    "msgtype": "markdown",
                     "text": text,
                 }
             )
@@ -449,6 +549,40 @@ class Daemon:
             )
         except Exception as e:
             return web.json_response({"error": str(e), "errcode": getattr(e, "errcode", None)}, status=502)
+        return web.json_response({"ok": True, **res})
+
+    async def _send_media_response(
+        self, data: Dict[str, Any], path: Path, kind: str
+    ) -> web.Response:
+        """图片/文件等素材消息：dry-run 只回帧摘要（不含 base64）。"""
+        try:
+            plan = self.media_plan(path, kind)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if data.get("dry_run"):
+            last = self.store.last_chat() or {}
+            return web.json_response(
+                {
+                    "dry_run": True,
+                    "chat_id": data.get("chat_id") or last.get("chatid"),
+                    "msgtype": kind,
+                    "media": plan,
+                    "frames": [
+                        P.CMD_UPLOAD_MEDIA_INIT,
+                        f"{P.CMD_UPLOAD_MEDIA_CHUNK} x{plan['total_chunks']}",
+                        P.CMD_UPLOAD_MEDIA_FINISH,
+                        f"{P.CMD_SEND_MSG}(msgtype={kind})",
+                    ],
+                }
+            )
+        try:
+            res = await self.do_send_media(
+                path, kind=kind, chat_id=data.get("chat_id"), chattype=data.get("chattype")
+            )
+        except Exception as e:
+            return web.json_response(
+                {"error": str(e), "errcode": getattr(e, "errcode", None)}, status=502
+            )
         return web.json_response({"ok": True, **res})
 
     async def h_reply(self, request: web.Request) -> web.Response:
