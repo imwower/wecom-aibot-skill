@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# claude bot 的 wecom 命令：同一份代码，仅用环境变量切到独立的配置/状态/日志目录。
+set -euo pipefail
+export WECOM_BOT_CONFIG="$HOME/.config/wecom-bot-claude/config.json"
+export WECOM_BOT_STATE_DIR="$HOME/.local/state/wecom-bot-claude"
+export WECOM_BOT_LOG_DIR="$HOME/Library/Logs/wecom-bot-claude"
+exec "$HOME/code/wecom-aibot-skill/bin/wecom" "$@"

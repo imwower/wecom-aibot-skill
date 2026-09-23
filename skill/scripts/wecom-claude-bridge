@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""把 claude bot 收到的 owner 私聊消息转进 tmux 常驻 Claude 会话（「喔喔的claude」）。
+
+循环 `wecom-claude --json wait`；只转发 owner 的私聊，其它消息只记日志并标已读。
+送达用 tmux-send.sh，再核对 Claude 输入框已清空；失败重试 2 次后记日志并标已读。
+tmux 会话不存在时只记日志并等待，不自动重建。
+环境变量：WECOM_CLAUDE_TMUX_TARGET（默认 喔喔的claude:0.0）、WECOM_CLAUDE_OWNER（覆盖 owner）。
+"""
+import json, os, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+WECOM = f"{HOME}/.claude/skills/wecom-bot/scripts/wecom-claude"
+TMUX_SEND = f"{HOME}/.claude/skills/tmux-cross-pane-messaging/tmux-send.sh"
+TARGET = os.environ.get("WECOM_CLAUDE_TMUX_TARGET", "喔喔的claude:0.0")
+
+
+def log(msg):
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), msg, flush=True)
+
+
+def owner_userid():
+    if os.environ.get("WECOM_CLAUDE_OWNER"):
+        return os.environ["WECOM_CLAUDE_OWNER"]
+    for p in (f"{HOME}/.config/wecom-bot-claude/config.json", f"{HOME}/.config/wecom-bot/config.json"):
+        try:
+            v = json.load(open(p)).get("owner_userid")
+            if v:
+                return v
+        except Exception:
+            pass
+    return None
+
+
+def wecom(*args, timeout=60):
+    r = subprocess.run([WECOM, "--json", *args], capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+def tmux_alive():
+    return subprocess.run(["tmux", "has-session", "-t", TARGET.split(":")[0]],
+                          capture_output=True).returncode == 0
+
+
+def input_box_has_text():
+    """Claude Code 输入框夹在最后两条 ─── 分隔线之间；里面还有正文/粘贴占位即未提交。"""
+    out = subprocess.run(["tmux", "capture-pane", "-p", "-t", TARGET],
+                         capture_output=True, text=True).stdout.splitlines()
+    seps = [i for i, l in enumerate(out) if l.strip().startswith("─")]
+    if len(seps) < 2:
+        return False
+    box = "\n".join(out[seps[-2] + 1:seps[-1]])
+    return "企微消息" in box or "Pasted text" in box
+
+
+def deliver(text):
+    for attempt in range(3):
+        r = subprocess.run([TMUX_SEND, TARGET, text], capture_output=True, text=True)
+        if r.returncode == 0 and "SUBMITTED" in r.stdout:
+            time.sleep(1)
+            if input_box_has_text():  # tmux-send 按 Codex 的 › 判定，这里再按 Claude 的输入框核一次
+                subprocess.run(["tmux", "send-keys", "-t", TARGET, "C-m"])
+                time.sleep(1.5)
+            if not input_box_has_text():
+                return True
+        log(f"送达失败 第{attempt + 1}次 rc={r.returncode} out={r.stdout.strip()[-200:]}")
+        time.sleep(3)
+    return False
+
+
+def main():
+    owner = owner_userid()
+    log(f"bridge 启动 target={TARGET} owner={'已取到 ' + owner if owner else '未取到（只记日志不转发）'}")
+    while True:
+        if not tmux_alive():
+            log(f"tmux 会话 {TARGET} 不存在，等待 30s（不自动重建）")
+            time.sleep(30)
+            continue
+        try:
+            rc, out, err = wecom("wait", "--timeout", "300", timeout=330)
+        except subprocess.TimeoutExpired:
+            continue
+        if rc == 4:
+            continue  # 超时无新消息
+        if rc != 0:
+            log(f"wait 失败 rc={rc} {err.strip()[-300:]}，10s 后重试")
+            time.sleep(10)
+            continue
+        msgs = json.loads(out).get("messages", [])
+        for m in msgs:
+            mid, sender = m.get("id"), m.get("from_userid")
+            ok_src = m.get("kind") == "message" and m.get("chattype") == "single" and owner and sender == owner
+            if not ok_src:
+                log(f"忽略 id={mid} kind={m.get('kind')} chattype={m.get('chattype')} from={sender}")
+                wecom("mark-read", str(mid))
+                continue
+            body = (m.get("text") or "").strip()
+            if m.get("media_path"):
+                body += f"\n[附件 {m.get('msgtype')}: {m['media_path']}]"
+            text = (f"[企微消息 msgid={m.get('msgid')} from={sender}] {body}\n"
+                    f"（处理完请用 {WECOM} reply --to {m.get('msgid')} --text \"<回复>\" 回复；"
+                    f"需要对外发送或写操作前先在企微里向用户确认）")
+            if deliver(text):
+                log(f"已转发 id={mid} msgid={m.get('msgid')}")
+            else:
+                log(f"转发失败已放弃 id={mid} msgid={m.get('msgid')}（重试 2 次仍未提交）")
+            wecom("mark-read", str(mid))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
