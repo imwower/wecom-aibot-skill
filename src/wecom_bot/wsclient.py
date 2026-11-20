@@ -56,6 +56,7 @@ class WeComWsClient:
         self._ws_url = ws_url
         self._heartbeat_interval = heartbeat_interval
         self._base_delay = reconnect_base_delay
+        self._last_delay = reconnect_base_delay
         self._max_delay = reconnect_max_delay
         self._ack_timeout = ack_timeout
         self._on_callback = on_callback
@@ -115,6 +116,13 @@ class WeComWsClient:
         except asyncio.TimeoutError:
             return False
 
+    def _backoff_delay(self, attempt: int) -> float:
+        # Double the previous wait instead of computing 2 ** n, which overflows
+        # for large n; the first attempt (re)starts from the base delay.
+        delay = self._base_delay if attempt <= 1 else self._last_delay * 2
+        self._last_delay = min(delay, self._max_delay)
+        return self._last_delay
+
     async def _run_forever(self) -> None:
         """连接主循环：断开后按指数退避重连，永不放弃。"""
         while not self._stopping:
@@ -134,7 +142,7 @@ class WeComWsClient:
             if self._stopping:
                 break
             self.reconnect_attempts += 1
-            delay = min(self._base_delay * (2 ** (self.reconnect_attempts - 1)), self._max_delay)
+            delay = self._backoff_delay(self.reconnect_attempts)
             log.info("%.1f 秒后重连（第 %d 次）", delay, self.reconnect_attempts)
             try:
                 await asyncio.sleep(delay)
@@ -143,7 +151,9 @@ class WeComWsClient:
 
     async def _connect_once(self) -> None:
         log.info("连接 %s", self._ws_url)
-        kwargs: Dict[str, Any] = {"ping_interval": None, "ping_timeout": None, "close_timeout": 2}
+        kwargs: Dict[str, Any] = {"ping_interval": None, "ping_timeout": None, "close_timeout": 2,
+                                  # Never route the WeCom gateway through a system proxy.
+                                  "proxy": None}
         if self._ws_url.startswith("wss://"):
             kwargs["ssl"] = self._ssl or ssl.create_default_context()
         async with websockets.connect(self._ws_url, **kwargs) as ws:

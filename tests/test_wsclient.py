@@ -115,3 +115,77 @@ async def test_serialised_replies_on_same_req_id(gateway):
         assert gateway.streams[rid].finished
     finally:
         await c.stop()
+
+
+def test_backoff_delay_values_and_cap():
+    c = WeComWsClient("b", "s", reconnect_base_delay=1.0, reconnect_max_delay=30.0)
+    assert [c._backoff_delay(n) for n in (1, 2, 3, 4, 5, 6, 7)] == [1, 2, 4, 8, 16, 30, 30]
+    assert c._backoff_delay(1) == 1  # a new outage restarts from the base delay
+
+
+def test_backoff_delay_reaches_cap_after_long_outage():
+    c = WeComWsClient("b", "s", reconnect_base_delay=1.0, reconnect_max_delay=30.0)
+    delays = [c._backoff_delay(n) for n in range(1, 3001)]
+    assert delays[1023:1027] == [30.0] * 4 and delays[-1] == 30.0
+
+
+def test_backoff_delay_tiny_base_still_reaches_cap():
+    c = WeComWsClient("b", "s", reconnect_base_delay=1e-300, reconnect_max_delay=30.0)
+    assert [c._backoff_delay(n) for n in range(1, 3001)][-1] == 30.0
+
+
+def test_backoff_delay_base_above_max():
+    c = WeComWsClient("b", "s", reconnect_base_delay=60.0, reconnect_max_delay=30.0)
+    assert [c._backoff_delay(n) for n in (1, 2, 3)] == [30.0] * 3
+
+
+async def test_retry_loop_survives_overflow_count_and_resets(gateway, monkeypatch):
+    c = WeComWsClient(
+        gateway.bot_id, gateway.secret, ws_url=gateway.url,
+        reconnect_base_delay=0.01, reconnect_max_delay=0.05,
+    )
+    real = c._connect_once
+    fail = {"n": 2}
+
+    async def flaky():
+        if fail["n"] > 0:
+            fail["n"] -= 1
+            raise OSError("down")
+        await real()
+
+    monkeypatch.setattr(c, "_connect_once", flaky)
+    c.reconnect_attempts = 1023  # next failure computes attempt 1024, then 1025
+    c.start()
+    try:
+        assert await c.wait_authenticated(5)
+        assert not c._run_task.done()
+        assert c.reconnect_attempts == 0  # reset after a successful connection
+    finally:
+        await c.stop()
+
+
+async def test_stop_during_backoff_sleep(gateway, monkeypatch):
+    c = WeComWsClient(gateway.bot_id, gateway.secret, ws_url=gateway.url,
+                      reconnect_base_delay=60, reconnect_max_delay=60)
+
+    async def down():
+        raise OSError("down")
+
+    monkeypatch.setattr(c, "_connect_once", down)
+    c.reconnect_attempts = 1100
+    c.start()
+    await asyncio.sleep(0.1)
+    await asyncio.wait_for(c.stop(), 3)
+    assert c._run_task is None
+
+
+async def test_connect_ignores_system_proxy(gateway, monkeypatch):
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(k, "http://127.0.0.1:9")  # dead proxy: use would break the connection
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    c = await _client(gateway)
+    try:
+        assert await c.wait_authenticated(5)
+    finally:
+        await c.stop()
